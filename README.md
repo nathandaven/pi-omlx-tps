@@ -2,7 +2,9 @@
 
 This extension is basic and adds omlx stat reporting using the built in omlx stats endpoint. The goal was to bring the stats given by the webui to the processing prompt.
 
-Example:
+![](./screenshots/demo.gif)
+
+**Example**:
 
 ```sh
  ⠴ Loading model... (17.0% complete, 31.2s remaining, 3.4gb/25.4gb used)
@@ -13,17 +15,7 @@ Example:
 
 It is reccomended to use the other omlx extension for the model configuration.
 
-## Screenshots
-
-![./1-loading.jpg]()
-
-![./2-preparing.jpg]()
-
-![./3-prefilling.jpg]()
-
-![./4-generating.jpg]()
-
-### Install
+## Install
 
 ```sh
 # npm
@@ -32,6 +24,17 @@ pi install npm:pi-omlx-stats
 # git
 pi install git:github.com/nathandaven/pi-omlx-tps
 ```
+
+## Screenshots
+
+![](./screenshots/1-loading.jpg)
+
+![](./screenshots/2-preparing.jpg)
+
+![](./screenshots/3-prefilling.jpg)
+
+![](./screenshots/4-generating.jpg)
+
 
 ## License
 

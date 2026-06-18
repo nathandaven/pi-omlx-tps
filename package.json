@@ -2,7 +2,8 @@
 	"name": "pi-omlx-tps",
 	"version": "0.1.0",
 	"type": "module",
-	"description": "Pi extension that shows OMLX inference TPS from SSE usage data.",
+	"author": "Nathan Davenport",
+	"description": "Pi extension that shows OMLX inference data in the processing prompt",
 	"license": "MIT",
 	"keywords": [
 		"pi-package"
