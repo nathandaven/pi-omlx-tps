@@ -118,23 +118,42 @@ async function pollStats(): Promise<void> {
         const models = stats?.active_models?.models;
         if (!models || !Array.isArray(models)) return;
 
+        /*
+ *         "model_memory_used": 4747803200,
+        "model_memory_max": 28927143283,
+        "memory_pressure": {
+            "enabled": true,
+            "current_bytes": 4747803200,
+            "soft_bytes": 24588071790,
+            "hard_bytes": 27480786118,
+            "current_formatted": "4.4GB",
+            "soft_formatted": "22.9GB",
+            "hard_formatted": "25.6GB",
+            "pressure_level": "ok"
+        },
+        */
+
         const memPressure = stats?.active_models?.memory_pressure;
         const memCurrent = memPressure?.current_bytes ?? 0; // for loading
         const memUsed = memPressure?.current_bytes ?? 0;
         const memUsedStr = memPressure?.current_formatted.toLowerCase() ?? "0gb";
         const memSoft = memPressure?.soft_bytes ?? 0;
+        const memHardStr = memPressure?.hard_formatted.toLowerCase() ?? "0gb";
 
         for (const m of models) {
+            if (!m.is_loading || !m.prefilling[0] || !m.generating[0]) {
+                const workingMsg = `Preparing... (${memUsedStr}/${memHardStr} used)`;
+                if (turnCtx?.hasUI) turnCtx.ui.setWorkingMessage(workingMsg);
+                log("thinking:", workingMsg);
+                continue;
+            }
+
             // determine state
             if (m.is_loading) {
-                const loading =
-                    Math.round(m?.loading_elapsed_seconds * 10 || 0) / 10 ?? 0;
                 const eta =
-                    Math.round(m?.loading_remaining_estimated_seconds * 10 || 0) / 10 ??
-                    0;
-                const pct =
-                    Math.round((memCurrent / m.estimated_size) * 1000) / 10 ?? 0;
-                const workingMsg = `Loading model... (${pct}%, ${eta}s, ${memUsedStr})`;
+                    Math.round(m?.loading_remaining_estimated_seconds * 10 || 0) / 10;
+                const pct = Math.round((memCurrent / m.estimated_size) * 1000) / 10;
+                const workingMsg = `Loading model... (${pct}%, ${eta}s, ${memUsedStr}/${memHardStr} used)`;
                 if (turnCtx?.hasUI) turnCtx.ui.setWorkingMessage(workingMsg);
                 log("loading:", workingMsg);
                 continue;
@@ -199,9 +218,9 @@ async function pollStats(): Promise<void> {
                     }
                 ],
                 */
-
             const prefilling = m.prefilling[0];
             const g = prefilling ? m.prefilling[0] : m.generating[0];
+            const type = prefilling ? "Prefilling" : "Generating";
 
             const total = g.total ?? g.prompt_tokens ?? 0;
             const processed = g.processed ?? g.generated_tokens ?? 0;
@@ -211,18 +230,15 @@ async function pollStats(): Promise<void> {
             const speed = Math.round(g.speed ?? g.tokens_per_second ?? 0);
             const calcEta = speed > 0 ? Math.round((total - processed) / speed) : 0;
             const eta = g.eta ?? calcEta ?? 0;
-            // const etaStr = etaMs > 0 ? fmtTimeMs(etaMs) : "";
-            // log("prefill:", workingMsg);
-            //
 
-            // if (!g.elapsed_seconds || g.elapsed_seconds <= 0.05) return;
             const progressMsg = prefilling
                 ? `${pct}% complete, ${eta}s remaining,`
                 : `${speed} tok/s, ${elapsed}s elapsed,`;
 
-            const workingMsg = `${prefilling ? "Prefilling" : "Generating"}... (${progressMsg} ${memUsedStr} used)`;
+            const workingMsg = `${type}... (${progressMsg} ${memUsedStr}/${memHardStr} used)`;
 
             if (turnCtx?.hasUI) turnCtx.ui.setWorkingMessage(workingMsg);
+            log(`${type}:`, workingMsg);
 
             // status bar — final TPS after generation
             if (lastChunk?.usage) {
