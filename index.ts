@@ -29,7 +29,7 @@ function loadOmlxCredential():
     | { baseUrl?: string; apiKey: string }
     | undefined {
     const raw = getAuthStorage().get(PROVIDER_KEY);
-    if (!raw) return undefined;
+    if (!raw || !raw.type) return undefined;
     if (raw.type === "api_key" && raw.key) {
         return { baseUrl: (raw as any).baseUrl, apiKey: raw.key };
     }
@@ -39,7 +39,9 @@ function loadOmlxCredential():
     return undefined;
 }
 
-function resolveOmlxConfig(): { apiRoot: string; apiKey: string } | null {
+let cachedConfig: { apiRoot: string; apiKey: string } | null = null;
+
+function readOmlxConfig(): { apiRoot: string; apiKey: string } | null {
     const envUrl = process.env.OMLX_BASE_URL;
     const envKey = process.env.OMLX_API_KEY;
 
@@ -55,6 +57,12 @@ function resolveOmlxConfig(): { apiRoot: string; apiKey: string } | null {
     }
 
     return null;
+}
+
+function resolveOmlxConfig(): { apiRoot: string; apiKey: string } | null {
+    if (cachedConfig) return cachedConfig;
+    cachedConfig = readOmlxConfig();
+    return cachedConfig;
 }
 
 function normalizeBaseUrl(raw: string): string {
@@ -121,12 +129,10 @@ async function pollStats(): Promise<void> {
     try {
         const stats = await (await fetch(adminUrl())).json();
         const models = stats?.active_models?.models;
-        // if (!models || !Array.isArray(models)) return;
+        if (!models || !Array.isArray(models)) return;
         const memPressure = stats?.active_models?.memory_pressure;
         const memCurrent = memPressure?.current_bytes ?? 0; // for loading
-        const memUsed = memPressure?.current_bytes ?? 0;
         const memUsedStr = memPressure?.current_formatted.toLowerCase() ?? "0gb";
-        const memSoft = memPressure?.soft_bytes ?? 0;
         const memHardStr = memPressure?.hard_formatted.toLowerCase() ?? "0gb";
 
         for (const m of models) {
@@ -195,7 +201,6 @@ async function pollStats(): Promise<void> {
 function captureOmlxTimings(
     body: ReadableStream<Uint8Array>,
 ): ReadableStream<Uint8Array> {
-    const capturedCtx = turnCtx;
     const reader = body.getReader();
     let buffer = "";
     const decoder = new TextDecoder();
@@ -285,7 +290,8 @@ export default function (pi: ExtensionAPI): void {
         if (response.ok && response.body) {
             return new Response(captureOmlxTimings(response.body), {
                 status: response.status,
-                headers: Object.fromEntries(response.headers),
+                statusText: response.statusText,
+                headers: new Headers(response.headers),
             });
         }
         return response;
@@ -314,8 +320,9 @@ export default function (pi: ExtensionAPI): void {
         lastTpsDisplay = null;
         pollTick = 0;
         turnCtx = ctx;
+        cachedConfig = null; // refresh config each turn
         log("turn_start: stored ctx, hasUI:", ctx.hasUI);
-        // start polling during model load gap (before stream response arrives)
+        if (!resolveOmlxConfig()) return; // skip polling if no config
         const loadPollInterval = setInterval(pollStats, 300);
         activePollers.push(loadPollInterval);
     });
@@ -324,6 +331,7 @@ export default function (pi: ExtensionAPI): void {
         lastChunk = null;
         lastTpsDisplay = null;
         turnCtx = null;
+        cachedConfig = null;
         stopActivePollers();
         globalThis.fetch = originalFetch;
         delete globalState[EXTENSION_KEY];
