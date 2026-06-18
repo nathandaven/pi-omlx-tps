@@ -1,0 +1,33 @@
+{
+	"name": "pi-omlx-tps",
+	"version": "0.1.0",
+	"type": "module",
+	"description": "Pi extension that shows OMLX inference TPS from SSE usage data.",
+	"license": "MIT",
+	"keywords": [
+		"pi-package"
+	],
+	"engines": {
+		"node": ">=22"
+	},
+	"scripts": {
+		"check": "biome check *.ts && tsc --noEmit",
+		"format": "biome check --write *.ts",
+		"typecheck": "tsc --noEmit"
+	},
+	"pi": {
+		"extensions": [
+			"./omlx-cpp-tps.ts"
+		]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.4.15",
+		"@earendil-works/pi-coding-agent": "0.75.5",
+		"@types/node": "^22.19.19",
+		"tsx": "^4.22.3",
+		"typescript": "^6.0.3"
+	}
+}
