@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { AuthStorage } from "@earendil-works/pi-coding-agent";
+import fs from "node:fs";
 
 const DEFAULT_OMLX_BASE_URL = "http://127.0.0.1:8000/v1";
 const LOG_FILE = "/tmp/omlx-tps.log";
@@ -9,72 +10,52 @@ const EXTENSION_KEY = Symbol.for("pi-omlx-tps/loaded");
 function log(...args: any[]) {
     if (!DEBUG) return;
     try {
-        fs.appendFileSync(
-            LOG_FILE,
-            `[${new Date().toISOString()}] [omlx-cpp-tps] ${args.join(" ")}\n`,
-        );
+        fs.appendFileSync(LOG_FILE, `[${new Date().toISOString()}] [omlx-tps] ${args.join(" ")}\n`);
     } catch { }
 }
 
-import fs from "node:fs";
-
-// Config
-const PROVIDER_KEY = "omlx";
-
-function getAuthStorage(): AuthStorage {
-    return AuthStorage.create();
-}
-
-function loadOmlxCredential():
-    | { baseUrl?: string; apiKey: string }
-    | undefined {
-    const raw = getAuthStorage().get(PROVIDER_KEY);
-    if (!raw || !raw.type) return undefined;
-    if (raw.type === "api_key" && raw.key) {
-        return { baseUrl: (raw as any).baseUrl, apiKey: raw.key };
-    }
-    if (raw.type === "oauth" && raw.access) {
-        return { baseUrl: (raw as any).baseUrl, apiKey: raw.access };
-    }
-    return undefined;
-}
-
+// config — cached per turn, invalidated on turn start / shutdown
 let cachedConfig: { apiRoot: string; apiKey: string } | null = null;
 
-function readOmlxConfig(): { apiRoot: string; apiKey: string } | null {
+function resolveOmlxConfig(): { apiRoot: string; apiKey: string } | null {
+    if (cachedConfig) return cachedConfig;
     const envUrl = process.env.OMLX_BASE_URL;
     const envKey = process.env.OMLX_API_KEY;
 
     if (envKey) {
-        const apiRoot = envUrl ? normalizeBaseUrl(envUrl) : DEFAULT_OMLX_BASE_URL;
-        return { apiRoot, apiKey: envKey };
+        return { apiRoot: envUrl ? normalizeUrl(envUrl) : DEFAULT_OMLX_BASE_URL, apiKey: envKey };
     }
 
-    const stored = loadOmlxCredential();
-    if (stored?.apiKey) {
-        const apiRoot = normalizeBaseUrl(stored.baseUrl ?? envUrl ?? "");
-        return { apiRoot, apiKey: stored.apiKey };
+    const raw = AuthStorage.create().get("omlx");
+    const storedUrl = (raw as any)?.baseUrl ?? envUrl;
+    if (raw?.type === "api_key" && raw.key) {
+        return { apiRoot: normalizeUrl(storedUrl ?? ""), apiKey: raw.key };
+    }
+    if (raw?.type === "oauth" && raw.access) {
+        return { apiRoot: normalizeUrl(storedUrl ?? ""), apiKey: raw.access };
     }
 
     return null;
 }
 
-function resolveOmlxConfig(): { apiRoot: string; apiKey: string } | null {
-    if (cachedConfig) return cachedConfig;
-    cachedConfig = readOmlxConfig();
-    return cachedConfig;
-}
-
-function normalizeBaseUrl(raw: string): string {
+function normalizeUrl(raw: string): string {
     const trimmed = raw.trim().replace(/\/+$/, "");
     if (!trimmed) return DEFAULT_OMLX_BASE_URL;
     return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
 }
 
-// Formatting
+function adminUrl(): string {
+    const cfg = resolveOmlxConfig();
+    const base = cfg ? cfg.apiRoot.replace(/\/v1$/, "") : DEFAULT_OMLX_BASE_URL.replace("/v1", "");
+    return base + "/admin/api/stats";
+}
 
-const downArrow = "↓";
-const upArrow = "↑";
+// state
+
+let lastChunk: { model: string; usage: OmlxUsage } | null = null;
+let lastTpsDisplay: string | null = null;
+let turnCtx: { ui: { setStatus(key: string, text: string | undefined): void; setWorkingMessage(msg: string): void }; hasUI: boolean } | null = null;
+let activePollers: ReturnType<typeof setInterval>[] = [];
 
 interface OmlxUsage {
     prompt_tokens?: number;
@@ -90,117 +71,101 @@ interface OmlxUsage {
     model_load_duration?: number;
 }
 
-interface LastChunk {
-    model: string;
-    usage: OmlxUsage;
-}
+// ui helpers
 
-let lastChunk: LastChunk | null = null;
-let lastTpsDisplay: string | null = null;
-let turnCtx: {
-    ui: {
-        setStatus(key: string, text: string | undefined): void;
-        setWorkingMessage(msg: string): void;
-    };
-    hasUI: boolean;
-} | null = null;
+const downArrow = "↓";
+const upArrow = "↑";
 
 function fmtTime(seconds: number | undefined): string {
     if (!seconds || seconds <= 0) return "";
     const ms = seconds * 1000;
-    if (ms < 1000) return `${Math.round(ms)}ms`;
-    return `${seconds.toFixed(2).replace(/\.?0+$/, "")}s`;
+    return ms < 1000 ? `${Math.round(ms)}ms` : `${seconds.toFixed(2).replace(/\.?0+$/, "")}s`;
 }
 
-// Stat endpoint polling
-
-let activePollers: ReturnType<typeof setInterval>[] = [];
-let pollTick = 0;
-
-function adminUrl(): string {
-    const cfg = resolveOmlxConfig();
-    if (!cfg) return DEFAULT_OMLX_BASE_URL.replace("/v1", "") + "/admin/api/stats";
-    // apiRoot already has /v1, strip it to get base, then add /admin/api/stats
-    return cfg.apiRoot.replace(/\/v1$/, "") + "/admin/api/stats";
+function buildStatus(usage: OmlxUsage): string {
+    const tps = usage.generation_tokens_per_second ?? 0;
+    const ptsp = usage.prompt_tokens_per_second ?? 0;
+    let status = `${downArrow}${tps.toFixed(1)} tok/s`;
+    const genT = fmtTime(usage.generation_duration);
+    if (genT) status += ` (${genT})`;
+    if (ptsp && ptsp > 0) {
+        let part = ` | In: ${upArrow}${ptsp.toFixed(1)} tok/s`;
+        const promptT = fmtTime(usage.prompt_eval_duration);
+        if (promptT) part += ` (${promptT})`;
+        status += part;
+    }
+    return status;
 }
+
+function updateStatus(usage: OmlxUsage) {
+    const status = buildStatus(usage);
+    if (status !== lastTpsDisplay) {
+        lastTpsDisplay = status;
+        if (turnCtx?.hasUI) turnCtx.ui.setStatus("omlx-tps", status);
+    }
+}
+
+function updateWorking(msg: string, label: string) {
+    if (turnCtx?.hasUI) turnCtx.ui.setWorkingMessage(msg);
+    log(label, msg);
+}
+
+// stats polling
 
 async function pollStats(): Promise<void> {
-    pollTick++;
     try {
         const stats = await (await fetch(adminUrl())).json();
         const models = stats?.active_models?.models;
         if (!models || !Array.isArray(models)) return;
-        const memPressure = stats?.active_models?.memory_pressure;
-        const memCurrent = memPressure?.current_bytes ?? 0; // for loading
-        const memUsedStr = memPressure?.current_formatted.toLowerCase() ?? "0gb";
-        const memHardStr = memPressure?.hard_formatted.toLowerCase() ?? "0gb";
+
+        const mp = stats?.active_models?.memory_pressure;
+        const memCurrent = mp?.current_bytes ?? 0;
+        const memUsedStr = mp?.current_formatted.toLowerCase() ?? "0gb";
+        const memHardStr = mp?.hard_formatted.toLowerCase() ?? "0gb";
 
         for (const m of models) {
+            // model idle — preparing
             if (!m.is_loading && !m.prefilling[0] && !m.generating[0]) {
-                const workingMsg = `Preparing... (${memUsedStr}/${memHardStr} used)`;
-                if (turnCtx?.hasUI) turnCtx.ui.setWorkingMessage(workingMsg);
-                log("thinking:", workingMsg);
+                updateWorking(`Preparing... (${memUsedStr}/${memHardStr} used)`, "thinking");
+                // still show cached tps from last stream
+                if (lastChunk?.usage) updateStatus(lastChunk.usage);
                 continue;
             }
 
-            // determine state
+            // model loading
             if (m.is_loading) {
-                const eta = Math.round(m?.loading_remaining_seconds_estimate * 10) / 10;
-                const pct = Math.round((memCurrent / m.estimated_size) * 1000) / 10;
-                const workingMsg = `Loading model... (${pct.toFixed(1)}% complete, ${eta.toFixed(1)}s remaining, ${memUsedStr}/${memHardStr} used)`;
-                if (turnCtx?.hasUI) turnCtx.ui.setWorkingMessage(workingMsg);
-                log("loading:", workingMsg);
+                const eta = Math.round((m.loading_remaining_seconds_estimate ?? 0) * 10) / 10;
+                const pct = Math.round((memCurrent / (m.estimated_size || 1)) * 1000) / 10;
+                updateWorking(`Loading model... (${pct.toFixed(1)}% complete, ${eta.toFixed(1)}s remaining, ${memUsedStr}/${memHardStr} used)`, "loading");
                 continue;
             }
 
+            // active: prefill or generate
             const prefilling = m.prefilling[0];
-            const g = prefilling ? m.prefilling[0] : m.generating[0];
-            const type = prefilling ? "Prefilling" : "Generating";
-
+            const g = prefilling || m.generating[0];
+            const isGen = !prefilling;
             const total = g.total ?? g.prompt_tokens ?? 0;
             const processed = g.processed ?? g.generated_tokens ?? 0;
             const pct = total > 0 ? Math.round((processed / total) * 1000) / 10 : 0;
             const elapsed = Math.round(g.elapsed ?? g.elapsed_seconds ?? 0);
-
             const speed = Math.round(g.speed ?? g.tokens_per_second ?? 0);
-            const calcEta = speed > 0 ? Math.round((total - processed) / speed) : 0;
-            const eta = g.eta ?? calcEta ?? 0;
+            const eta = g.eta ?? (speed > 0 ? Math.round((total - processed) / speed) : 0);
 
-            const progressMsg = prefilling
-                ? `${pct.toFixed(1)}% complete, ${eta.toFixed(1)}s remaining,`
-                : `${speed.toFixed(1)} tok/s, ${elapsed.toFixed(1)}s elapsed,`;
+            const progressMsg = isGen
+                ? `${speed.toFixed(1)} tok/s, ${elapsed.toFixed(1)}s elapsed,`
+                : `${pct.toFixed(1)}% complete, ${eta.toFixed(1)}s remaining,`;
 
-            const workingMsg = `${type}... (${progressMsg} ${memUsedStr}/${memHardStr} used)`;
+            updateWorking(`${isGen ? "Generating" : "Prefilling"}... (${progressMsg} ${memUsedStr}/${memHardStr} used)`, isGen ? "gen" : "prefill");
 
-            if (turnCtx?.hasUI) turnCtx.ui.setWorkingMessage(workingMsg);
-            log(`${type}:`, workingMsg);
-
-            // status bar — final TPS after generation
-            if (lastChunk?.usage) {
-                const tpsFinal = lastChunk.usage.generation_tokens_per_second ?? 0;
-                const ptsp = lastChunk.usage.prompt_tokens_per_second ?? 0;
-                const genMs = lastChunk.usage.generation_duration;
-                const promptMs = lastChunk.usage.prompt_eval_duration;
-                let status = `${downArrow}${tpsFinal.toFixed(1)} tok/s${fmtTime(genMs) ? ` (${fmtTime(genMs)})` : ""}`;
-                if (ptsp && ptsp > 0) {
-                    status += ` | In: ${upArrow}${ptsp.toFixed(1)} tok/s${fmtTime(promptMs) ? ` (${fmtTime(promptMs)})` : ""}`;
-                }
-                if (status !== lastTpsDisplay) {
-                    lastTpsDisplay = status;
-                    if (turnCtx?.hasUI) turnCtx.ui.setStatus("omlx-tps", status);
-                }
-            }
-
-            log("poll live:", workingMsg);
+            // status bar from last captured stream usage
+            if (lastChunk?.usage) updateStatus(lastChunk.usage);
         }
     } catch { }
 }
 
-// Fetch interception
+// fetch interception — capture SSE usage chunks
 
-function captureOmlxTimings(
-    body: ReadableStream<Uint8Array>,
-): ReadableStream<Uint8Array> {
+function captureOmlxTimings(body: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
     const reader = body.getReader();
     let buffer = "";
     const decoder = new TextDecoder();
@@ -212,7 +177,6 @@ function captureOmlxTimings(
                 if (done) break;
 
                 buffer += decoder.decode(value, { stream: true });
-
                 const lines = buffer.split("\n");
                 buffer = lines.pop() || "";
 
@@ -224,36 +188,52 @@ function captureOmlxTimings(
                         const chunk = JSON.parse(jsonStr);
                         if (chunk.usage) {
                             lastChunk = { model: "omlx", usage: chunk.usage };
-                            log("USAGE:", JSON.stringify(chunk.usage));
+                            log("usage:", JSON.stringify(chunk.usage));
                         }
                     } catch { }
                 }
 
                 controller.enqueue(value);
             }
-
-            decoder.decode();
             controller.close();
         },
-        cancel(reason?: any) {
-            reader.cancel(reason);
-        },
+        cancel(reason?: any) { reader.cancel(reason); },
     });
 }
 
-function stopActivePollers() {
-    for (const id of activePollers) clearInterval(id);
-    activePollers = [];
+function ensureStreamOptions(input: any, init?: any) {
+    try {
+        const payload = typeof input === "string" ? input : (init?.body ?? input?.body);
+        if (!payload) return;
+        const p = typeof payload === "string" ? JSON.parse(payload) : payload;
+        if (!p.stream_options) {
+            p.stream_options = { include_usage: true };
+            const newBody = JSON.stringify(p);
+            if (typeof input === "string") {
+                init = { ...init, body: newBody };
+            } else if (input) {
+                input.body = newBody;
+            }
+        }
+    } catch { }
 }
 
 function isOmlxRequest(input: any): boolean {
     const url = typeof input === "string" ? input : input?.url;
-    if (typeof url !== "string") return false;
-    if (!url.includes("/chat/completions")) return false;
-    return !!resolveOmlxConfig();
+    return typeof url === "string" && url.includes("/chat/completions") && !!resolveOmlxConfig();
 }
 
-// Pi extension
+function stopPollers() {
+    for (const id of activePollers) clearInterval(id);
+    activePollers = [];
+}
+
+function resetState() {
+    lastChunk = null;
+    lastTpsDisplay = null;
+}
+
+// extension entry
 
 export default function (pi: ExtensionAPI): void {
     const globalState = globalThis as Record<PropertyKey, unknown>;
@@ -263,28 +243,9 @@ export default function (pi: ExtensionAPI): void {
     const originalFetch = globalThis.fetch;
 
     globalThis.fetch = async (input: any, init?: any) => {
-        if (!isOmlxRequest(input)) {
-            return originalFetch(input, init);
-        }
+        if (!isOmlxRequest(input)) return originalFetch(input, init);
 
-        try {
-            const payload =
-                typeof input === "string" ? input : (init?.body ?? input?.body);
-            if (payload) {
-                const p = typeof payload === "string" ? JSON.parse(payload) : payload;
-                if (p?.model) {
-                }
-                if (!p.stream_options) {
-                    p.stream_options = { include_usage: true };
-                    const newBody = JSON.stringify(p);
-                    if (typeof input === "string") {
-                        init = { ...init, body: newBody };
-                    } else if (input) {
-                        input.body = newBody;
-                    }
-                }
-            }
-        } catch { }
+        ensureStreamOptions(input, init);
 
         const response = await originalFetch(input, init);
         if (response.ok && response.body) {
@@ -297,42 +258,32 @@ export default function (pi: ExtensionAPI): void {
         return response;
     };
 
-    pi.on("turn_end", (event, ctx) => {
-        stopActivePollers();
-        if (!lastChunk?.usage) return;
-        const tps = lastChunk.usage.generation_tokens_per_second ?? 0;
-        const ptsp = lastChunk.usage.prompt_tokens_per_second ?? 0;
-        const genMs = lastChunk.usage.generation_duration;
-        const promptMs = lastChunk.usage.prompt_eval_duration;
-        let status = `${downArrow}${tps.toFixed(1)} tok/s${fmtTime(genMs) ? ` (${fmtTime(genMs)})` : ""}`;
-        if (ptsp && ptsp > 0) {
-            status += ` | In: ${upArrow}${ptsp.toFixed(1)} tok/s${fmtTime(promptMs) ? ` (${fmtTime(promptMs)})` : ""}`;
-        }
-        if (status !== lastTpsDisplay && ctx.hasUI) {
-            lastTpsDisplay = status;
-            ctx.ui.setStatus("omlx-tps", status);
-            log("turn_end status:", status);
-        }
-    });
-
-    pi.on("before_agent_start", (event, ctx) => {
-        lastChunk = null;
-        lastTpsDisplay = null;
-        pollTick = 0;
+    pi.on("before_agent_start", (_event, ctx) => {
+        resetState();
         turnCtx = ctx;
         cachedConfig = null; // refresh config each turn
-        log("turn_start: stored ctx, hasUI:", ctx.hasUI);
+        log("turn_start, hasUI:", ctx.hasUI);
         if (!resolveOmlxConfig()) return; // skip polling if no config
-        const loadPollInterval = setInterval(pollStats, 300);
-        activePollers.push(loadPollInterval);
+        activePollers.push(setInterval(pollStats, 300));
+    });
+
+    pi.on("turn_end", (_event, ctx) => {
+        stopPollers();
+        if (lastChunk?.usage && ctx.hasUI) {
+            const status = buildStatus(lastChunk.usage);
+            if (status !== lastTpsDisplay) {
+                lastTpsDisplay = status;
+                ctx.ui.setStatus("omlx-tps", status);
+                log("turn_end status:", status);
+            }
+        }
     });
 
     pi.on("session_shutdown", () => {
-        lastChunk = null;
-        lastTpsDisplay = null;
+        resetState();
         turnCtx = null;
         cachedConfig = null;
-        stopActivePollers();
+        stopPollers();
         globalThis.fetch = originalFetch;
         delete globalState[EXTENSION_KEY];
     });
