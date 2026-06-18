@@ -14,6 +14,174 @@ function log(...args: any[]) {
     } catch { }
 }
 
+// typed stats response from /admin/api/stats
+
+interface OmlxWaitingRequest {
+    request_id: string;
+    queue_position: number;
+    elapsed_seconds: number;
+    prompt_tokens: number;
+}
+
+interface OmlxPrefilling {
+    request_id: string;
+    processed: number;
+    total: number;
+    speed: number;
+    eta: number | null;
+    elapsed: number;
+    phase: "prefill";
+    detail: string | null;
+}
+
+interface OmlxGenerating {
+    request_id: string;
+    elapsed_seconds: number;
+    generated_tokens: number;
+    tokens_per_second: number;
+    last_activity_age_seconds: number;
+    prompt_tokens: number;
+    max_tokens: number;
+}
+
+interface OmlxModel {
+    id: string;
+    estimated_size: number;
+    estimated_size_formatted: string;
+    actual_size: number;
+    actual_size_formatted: string | null;
+    pinned: boolean;
+    is_loading: boolean;
+    loading_elapsed_seconds: number | null;
+    loading_estimated_seconds: number | null;
+    loading_remaining_seconds_estimate: number | null;
+    active_requests: number;
+    waiting_requests: number;
+    waiting: OmlxWaitingRequest[];
+    activities: never[];
+    prefilling: OmlxPrefilling[];
+    generating: OmlxGenerating[];
+    idle_seconds: number | null;
+    ttl_remaining_seconds: number | null;
+}
+
+interface OmlxMemoryPressure {
+    enabled: boolean;
+    current_bytes: number;
+    soft_bytes: number;
+    hard_bytes: number;
+    current_formatted: string;
+    soft_formatted: string;
+    hard_formatted: string;
+    pressure_level: string;
+}
+
+interface OmlxActiveModels {
+    models: OmlxModel[];
+    model_memory_used: number;
+    model_memory_max: number;
+    memory_pressure: OmlxMemoryPressure | null;
+    total_active_requests: number;
+    total_waiting_requests: number;
+}
+
+interface OmlxEngineInfo {
+    name: string;
+    version: string;
+    commit: string | null;
+    url: string | null;
+}
+
+interface CacheWindow {
+    prefix_hit_rate: number;
+    prefix_hits: number;
+    prefix_misses: number;
+    prefix_match_efficiency: number;
+    evictions: number;
+    eviction_rate_per_min: number;
+    ssd_hot_hits: number;
+    ssd_disk_loads: number;
+    ssd_hot_rate: number;
+}
+
+interface CacheCumulative {
+    prefix_hits: number;
+    prefix_misses: number;
+    prefix_hit_rate: number;
+    prefix_tokens_saved: number;
+    prefix_match_efficiency: number;
+    evictions: number;
+    ssd_hot_hits: number;
+    ssd_disk_loads: number;
+    ssd_saves: number;
+    hot_cache_evictions: number;
+    hot_cache_promotions: number;
+    ssd_hot_rate: number;
+}
+
+interface OmlxCacheRates {
+    windows: {
+        "1m": CacheWindow;
+        "5m": CacheWindow;
+        "15m": CacheWindow;
+    };
+    cumulative: CacheCumulative;
+}
+
+interface OmlxCacheModel {
+    id: string;
+    block_size: number;
+    indexed_blocks: number;
+    indexed_blocks_display: string;
+    has_sub_block_cache: boolean;
+    partial_block_skips: number;
+    partial_tokens_skipped: number;
+    last_partial_tokens_skipped: number;
+    last_tokens_to_next_block: number;
+    num_files: number;
+    total_size_bytes: number;
+    max_size_bytes: number;
+    hot_cache_max_bytes: number;
+    hot_cache_size_bytes: number;
+    hot_cache_entries: number;
+    cache_rates: OmlxCacheRates;
+}
+
+interface OmlxRuntimeCache {
+    base_path: string;
+    ssd_cache_dir: string;
+    response_state_dir: string;
+    models: OmlxCacheModel[];
+    total_num_files: number;
+    total_size_bytes: number;
+    effective_block_sizes: number[];
+    disk_max_bytes: number;
+    hot_cache_max_bytes: number;
+    hot_cache_size_bytes: number;
+    hot_cache_entries: number;
+}
+
+interface OmlxStatsResponse {
+    total_tokens_served: number;
+    total_cached_tokens: number;
+    cache_efficiency: number;
+    total_prompt_tokens: number;
+    total_completion_tokens: number;
+    total_requests: number;
+    avg_prefill_tps: number;
+    avg_generation_tps: number;
+    uptime_seconds: number;
+    host: string;
+    port: number;
+    api_key: string;
+    cli_prefix: string;
+    claude_code_context_scaling_enabled: boolean;
+    claude_code_target_context_size: number;
+    engines: Record<string, OmlxEngineInfo>;
+    active_models: OmlxActiveModels;
+    runtime_cache: OmlxRuntimeCache;
+}
+
 // config — cached per turn, invalidated on turn start / shutdown
 let cachedConfig: { apiRoot: string; apiKey: string } | null = null;
 
@@ -50,14 +218,10 @@ function adminUrl(): string {
     return base + "/admin/api/stats";
 }
 
-// state
+// state — current request model id from fetch intercept, used to find exact model in stats
+let activeModelId: string | null = null;
 
-let lastChunk: { model: string; usage: OmlxUsage } | null = null;
-let lastTpsDisplay: string | null = null;
-let turnCtx: { ui: { setStatus(key: string, text: string | undefined): void; setWorkingMessage(msg: string): void }; hasUI: boolean } | null = null;
-let activePollers: ReturnType<typeof setInterval>[] = [];
-
-interface OmlxUsage {
+interface OmlxStreamUsage {
     prompt_tokens?: number;
     completion_tokens?: number;
     total_tokens?: number;
@@ -71,6 +235,11 @@ interface OmlxUsage {
     model_load_duration?: number;
 }
 
+let lastChunk: { model: string; usage: OmlxStreamUsage } | null = null;
+let lastTpsDisplay: string | null = null;
+let turnCtx: { ui: { setStatus(key: string, text: string | undefined): void; setWorkingMessage(msg: string): void }; hasUI: boolean } | null = null;
+let activePollers: ReturnType<typeof setInterval>[] = [];
+
 // ui helpers
 
 const downArrow = "↓";
@@ -82,22 +251,22 @@ function fmtTime(seconds: number | undefined): string {
     return ms < 1000 ? `${Math.round(ms)}ms` : `${seconds.toFixed(2).replace(/\.?0+$/, "")}s`;
 }
 
-function buildStatus(usage: OmlxUsage): string {
+function buildStatus(usage: OmlxStreamUsage): string {
     const tps = usage.generation_tokens_per_second ?? 0;
     const ptsp = usage.prompt_tokens_per_second ?? 0;
-    let status = `${downArrow}${tps.toFixed(1)} tok/s`;
+    let out = `${downArrow}${tps.toFixed(1)} tok/s`;
     const genT = fmtTime(usage.generation_duration);
-    if (genT) status += ` (${genT})`;
-    if (ptsp && ptsp > 0) {
+    if (genT) out += ` (${genT})`;
+    if (ptsp > 0) {
         let part = ` | In: ${upArrow}${ptsp.toFixed(1)} tok/s`;
         const promptT = fmtTime(usage.prompt_eval_duration);
         if (promptT) part += ` (${promptT})`;
-        status += part;
+        out += part;
     }
-    return status;
+    return out;
 }
 
-function updateStatus(usage: OmlxUsage) {
+function updateStatus(usage: OmlxStreamUsage) {
     const status = buildStatus(usage);
     if (status !== lastTpsDisplay) {
         lastTpsDisplay = status;
@@ -114,56 +283,64 @@ function updateWorking(msg: string, label: string) {
 
 async function pollStats(): Promise<void> {
     try {
-        const stats = await (await fetch(adminUrl())).json();
-        const models = stats?.active_models?.models;
-        if (!models || !Array.isArray(models)) return;
+        const stats = await (await fetch(adminUrl())).json() as OmlxStatsResponse;
+        const am = stats.active_models;
+        if (!am) return;
 
-        const mp = stats?.active_models?.memory_pressure;
+        // find the exact model for the current request, fallback to first
+        const model = activeModelId
+            ? am.models.find(m => m.id === activeModelId) ?? am.models[0]
+            : am.models[0];
+        if (!model) return;
+
+        const mp = am.memory_pressure;
         const memCurrent = mp?.current_bytes ?? 0;
-        const memUsedStr = mp?.current_formatted.toLowerCase() ?? "0gb";
-        const memHardStr = mp?.hard_formatted.toLowerCase() ?? "0gb";
+        const memUsed = mp?.current_formatted.toLowerCase() ?? "0gb";
+        const memHard = mp?.hard_formatted.toLowerCase() ?? "0gb";
+        const memTag = `${memUsed}/${memHard} used`;
 
-        for (const m of models) {
-            // model idle — preparing
-            if (!m.is_loading && !m.prefilling[0] && !m.generating[0]) {
-                updateWorking(`Preparing... (${memUsedStr}/${memHardStr} used)`, "thinking");
-                // still show cached tps from last stream
-                if (lastChunk?.usage) updateStatus(lastChunk.usage);
-                continue;
-            }
-
+        switch (true) {
             // model loading
-            if (m.is_loading) {
-                const eta = Math.round((m.loading_remaining_seconds_estimate ?? 0) * 10) / 10;
-                const pct = Math.round((memCurrent / (m.estimated_size || 1)) * 1000) / 10;
-                updateWorking(`Loading model... (${pct.toFixed(1)}% complete, ${eta.toFixed(1)}s remaining, ${memUsedStr}/${memHardStr} used)`, "loading");
-                continue;
+            case model.is_loading: {
+                const eta = Math.round((model.loading_remaining_seconds_estimate ?? 0) * 10) / 10;
+                const pct = Math.round((memCurrent / (model.estimated_size || 1)) * 1000) / 10;
+                updateWorking(`Loading model... (${pct.toFixed(1)}% complete, ${eta.toFixed(1)}s remaining, ${memTag})`, "loading");
+                break;
             }
 
-            // active: prefill or generate
-            const prefilling = m.prefilling[0];
-            const g = prefilling || m.generating[0];
-            const isGen = !prefilling;
-            const total = g.total ?? g.prompt_tokens ?? 0;
-            const processed = g.processed ?? g.generated_tokens ?? 0;
-            const pct = total > 0 ? Math.round((processed / total) * 1000) / 10 : 0;
-            const elapsed = Math.round(g.elapsed ?? g.elapsed_seconds ?? 0);
-            const speed = Math.round(g.speed ?? g.tokens_per_second ?? 0);
-            const eta = g.eta ?? (speed > 0 ? Math.round((total - processed) / speed) : 0);
+            // active prefill
+            case model.prefilling.length > 0: {
+                const p = model.prefilling[0];
+                const total = p.total;
+                const processed = p.processed;
+                const pct = total > 0 ? Math.round((processed / total) * 1000) / 10 : 0;
+                const eta = p.eta ?? 0;
+                updateWorking(`Prefilling... (${pct.toFixed(1)}% complete, ${eta.toFixed(1)}s remaining, ${memTag})`, "prefill");
+                if (lastChunk?.usage) updateStatus(lastChunk.usage);
+                break;
+            }
 
-            const progressMsg = isGen
-                ? `${speed.toFixed(1)} tok/s, ${elapsed.toFixed(1)}s elapsed,`
-                : `${pct.toFixed(1)}% complete, ${eta.toFixed(1)}s remaining,`;
+            // active generation
+            case model.generating.length > 0: {
+                const g = model.generating[0];
+                const speed = Math.round(g.tokens_per_second);
+                const elapsed = Math.round(g.elapsed_seconds);
+                updateWorking(`Generating... (${speed.toFixed(1)} tok/s, ${elapsed.toFixed(1)}s elapsed, ${memTag})`, "gen");
+                if (lastChunk?.usage) updateStatus(lastChunk.usage);
+                break;
+            }
 
-            updateWorking(`${isGen ? "Generating" : "Prefilling"}... (${progressMsg} ${memUsedStr}/${memHardStr} used)`, isGen ? "gen" : "prefill");
-
-            // status bar from last captured stream usage
-            if (lastChunk?.usage) updateStatus(lastChunk.usage);
+            // idle / preparing
+            default: {
+                updateWorking(`Preparing... (${memTag})`, "prepare");
+                if (lastChunk?.usage) updateStatus(lastChunk.usage);
+                break;
+            }
         }
     } catch { }
 }
 
-// fetch interception — capture SSE usage chunks
+// fetch interception
 
 function captureOmlxTimings(body: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
     const reader = body.getReader();
@@ -187,7 +364,7 @@ function captureOmlxTimings(body: ReadableStream<Uint8Array>): ReadableStream<Ui
                     try {
                         const chunk = JSON.parse(jsonStr);
                         if (chunk.usage) {
-                            lastChunk = { model: "omlx", usage: chunk.usage };
+                            lastChunk = { model: chunk.model ?? "omlx", usage: chunk.usage };
                             log("usage:", JSON.stringify(chunk.usage));
                         }
                     } catch { }
@@ -206,6 +383,8 @@ function ensureStreamOptions(input: any, init?: any) {
         const payload = typeof input === "string" ? input : (init?.body ?? input?.body);
         if (!payload) return;
         const p = typeof payload === "string" ? JSON.parse(payload) : payload;
+        // grab model id for targeted stats lookup
+        if (p?.model) activeModelId = p.model;
         if (!p.stream_options) {
             p.stream_options = { include_usage: true };
             const newBody = JSON.stringify(p);
@@ -231,6 +410,7 @@ function stopPollers() {
 function resetState() {
     lastChunk = null;
     lastTpsDisplay = null;
+    activeModelId = null;
 }
 
 // extension entry
