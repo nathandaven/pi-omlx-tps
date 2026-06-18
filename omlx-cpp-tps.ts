@@ -2,6 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { AuthStorage } from "@earendil-works/pi-coding-agent";
 
 const DEFAULT_OMLX_BASE_URL = "http://127.0.0.1:8000/v1";
+const ADMIN_URL = "http://127.0.0.1:8000/admin/api/stats";
 const LOG_FILE = "/tmp/omlx-cpp-tps.log";
 const DEBUG = process.env.OMLX_CPP_EXTENSION_DEBUG === "1";
 const EXTENSION_KEY = Symbol.for("pi-omlx-tps/loaded");
@@ -13,7 +14,7 @@ function log(...args: any[]) {
 
 import fs from "node:fs";
 
-// ─── Minimal omlx config helpers (shared with pi-omlx-picker) ─────────────
+// ─── Minimal omlx config helpers ──────────────────────────────────────────
 
 const PROVIDER_KEY = "omlx";
 
@@ -82,28 +83,19 @@ interface LastChunk {
 }
 
 let lastChunk: LastChunk | null = null;
-let currentModel: string = "omlx";
 let lastTpsDisplay: string | null = null;
-
-function formatTps(data: OmlxUsage): string | null {
-	const tps = data.generation_tokens_per_second;
-	const ptsp = data.prompt_tokens_per_second;
-	const genMs = data.generation_duration;
-	const promptMs = data.prompt_eval_duration;
-
-	if (!tps || tps <= 0) return null;
-
-	if (ptsp && ptsp > 0) {
-		return `Out: ${downArrow}${Number(tps).toFixed(1)} tok/s${fmtTime(genMs) ? ` (${fmtTime(genMs)})` : ""} | In: ${upArrow}${Number(ptsp).toFixed(1)} tok/s${fmtTime(promptMs) ? ` (${fmtTime(promptMs)})` : ""}`;
-	}
-	return `${downArrow}${Number(tps).toFixed(1)} tok/s${fmtTime(genMs) ? ` (${fmtTime(genMs)})` : ""}`;
-}
+let turnCtx: { ui: { setStatus(key: string, text: string | undefined): void; setWorkingMessage(msg: string): void }, hasUI: boolean } | null = null;
 
 function fmtTime(seconds: number | undefined): string {
 	if (!seconds || seconds <= 0) return "";
 	const ms = seconds * 1000;
 	if (ms < 1000) return `${Math.round(ms)}ms`;
 	return `${seconds.toFixed(2).replace(/\.?0+$/, "")}s`;
+}
+
+function fmtTimeMs(ms: number): string {
+	if (ms < 1000) return `${Math.round(ms)}ms`;
+	return `${(ms / 1000).toFixed(1).replace(/\.0$/, "")}s`;
 }
 
 function parseUsageChunk(line: string): OmlxUsage | null {
@@ -118,15 +110,89 @@ function parseUsageChunk(line: string): OmlxUsage | null {
 	}
 }
 
+// ─── Stats polling during stream ──────────────────────────────────────────
+
+let activePollers: ReturnType<typeof setInterval>[] = [];
+let pollTick = 0;
+
+async function pollStats(): Promise<void> {
+	pollTick++;
+	try {
+		const stats = await (await fetch(ADMIN_URL)).json();
+		const models = stats?.active_models?.models;
+		if (!models || !Array.isArray(models)) return;
+
+		const memPressure = stats?.active_models?.memory_pressure;
+		let memLine = "";
+		if (memPressure) {
+			memLine = `MEM ${memPressure.current_formatted}`;
+			if (memPressure.soft_formatted && memPressure.soft_formatted !== memPressure.current_formatted) {
+				memLine += ` / ${memPressure.soft_formatted}`;
+			}
+		}
+
+		for (const m of models) {
+			if (!m.generating || m.generating.length === 0) continue;
+			const g = m.generating[0];
+
+			// skip stale — first tick or zero elapsed
+			if (pollTick <= 1 || !g.elapsed_seconds || g.elapsed_seconds <= 0.05) return;
+
+			const tps = g.tokens_per_second ?? 0;
+			const elapsed = g.elapsed_seconds;
+			const genTokens = g.generated_tokens ?? 0;
+			const maxTokens = g.max_tokens ?? 0;
+			const nPp = m.generating.length;
+			const totalReqs = m.active_requests ?? 1;
+			const obsMem = m.actual_size_formatted ?? "";
+			const estMem = m.estimated_size_formatted ?? "";
+
+			const pct = maxTokens > 0 ? Math.round(genTokens / maxTokens * 100) : 0;
+			const eta = tps > 0 ? fmtTimeMs((maxTokens - genTokens) / tps * 1000) : "?s";
+
+			if (!turnCtx || !turnCtx.hasUI) return;
+
+			// build: model | PP$req | TPS | progress | tokens | time | ETA | MEM
+			const workingMsg = `${m.id} · ${nPp} PP · ${totalReqs} req · ${downArrow}${tps.toFixed(0)} tok/s | ${pct}% (${genTokens}/${maxTokens}) ${fmtTimeMs(elapsed * 1000)} | ${eta}${obsMem ? ` | ~${obsMem}${estMem && estMem !== obsMem ? ` / ${estMem}` : ""}` : ""}${memLine ? ` · ${memLine}` : ""}`;
+			turnCtx.ui.setWorkingMessage(workingMsg);
+
+			// status bar — final TPS after generation
+			if (lastChunk?.usage) {
+				const tpsFinal = lastChunk.usage.generation_tokens_per_second ?? 0;
+				const ptsp = lastChunk.usage.prompt_tokens_per_second ?? 0;
+				const genMs = lastChunk.usage.generation_duration;
+				const promptMs = lastChunk.usage.prompt_eval_duration;
+				let status = `${downArrow}${tpsFinal.toFixed(1)} tok/s${fmtTime(genMs) ? ` (${fmtTime(genMs)})` : ""}`;
+				if (ptsp && ptsp > 0) {
+					status += ` | In: ${upArrow}${ptsp.toFixed(1)} tok/s${fmtTime(promptMs) ? ` (${fmtTime(promptMs)})` : ""}`;
+				}
+				if (status !== lastTpsDisplay) {
+					lastTpsDisplay = status;
+					turnCtx.ui.setStatus("omlx-tps", status);
+				}
+			}
+
+			log("poll live:", workingMsg);
+		}
+	} catch {}
+}
+
 // ─── Fetch interceptor ────────────────────────────────────────────────────
 
 function captureOmlxTimings(body: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+	const capturedCtx = turnCtx;
 	const reader = body.getReader();
 	let buffer = "";
 	const decoder = new TextDecoder();
 
 	return new ReadableStream({
 		async start(controller) {
+			// start polling as soon as stream starts
+			if (capturedCtx) {
+				const pollInterval = setInterval(pollStats, 300);
+				activePollers.push(pollInterval);
+			}
+
 			while (true) {
 				const { done, value } = await reader.read();
 				if (done) break;
@@ -138,7 +204,7 @@ function captureOmlxTimings(body: ReadableStream<Uint8Array>): ReadableStream<Ui
 				for (const line of lines) {
 					const usage = parseUsageChunk(line);
 					if (usage) {
-						lastChunk = { model: currentModel, usage };
+						lastChunk = { model: "omlx", usage };
 						log("USAGE:", JSON.stringify(usage));
 					}
 				}
@@ -146,6 +212,7 @@ function captureOmlxTimings(body: ReadableStream<Uint8Array>): ReadableStream<Ui
 				controller.enqueue(value);
 			}
 
+			// stop polling when stream ends
 			decoder.decode();
 			controller.close();
 		},
@@ -153,6 +220,11 @@ function captureOmlxTimings(body: ReadableStream<Uint8Array>): ReadableStream<Ui
 			reader.cancel(reason);
 		},
 	});
+}
+
+function stopActivePollers() {
+	for (const id of activePollers) clearInterval(id);
+	activePollers = [];
 }
 
 function isOmlxRequest(input: any): boolean {
@@ -176,12 +248,13 @@ export default function (pi: ExtensionAPI): void {
 			return originalFetch(input, init);
 		}
 
-		// Extract model name from request body
 		try {
 			const payload = typeof input === "string" ? input : (init?.body ?? input?.body);
 			if (payload) {
 				const p = typeof payload === "string" ? JSON.parse(payload) : payload;
-				if (p?.model) currentModel = p.model;
+				if (p?.model) {
+					// don't set currentModel — not used with stats API approach
+				}
 				if (!p.stream_options) {
 					p.stream_options = { include_usage: true };
 					const newBody = JSON.stringify(p);
@@ -205,23 +278,37 @@ export default function (pi: ExtensionAPI): void {
 	};
 
 	pi.on("turn_end", (event, ctx) => {
+		// final refresh after stream is fully consumed
+		stopActivePollers();
 		if (!lastChunk?.usage) return;
-		const display = formatTps(lastChunk.usage);
-		if (display && ctx.hasUI && display !== lastTpsDisplay) {
-			lastTpsDisplay = display;
-			ctx.ui.setStatus("omlx-tps", display);
-			log("Set status:", display);
+		const tps = lastChunk.usage.generation_tokens_per_second ?? 0;
+		const ptsp = lastChunk.usage.prompt_tokens_per_second ?? 0;
+		const genMs = lastChunk.usage.generation_duration;
+		const promptMs = lastChunk.usage.prompt_eval_duration;
+		let status = `${downArrow}${tps.toFixed(1)} tok/s${fmtTime(genMs) ? ` (${fmtTime(genMs)})` : ""}`;
+		if (ptsp && ptsp > 0) {
+			status += ` | In: ${upArrow}${ptsp.toFixed(1)} tok/s${fmtTime(promptMs) ? ` (${fmtTime(promptMs)})` : ""}`;
+		}
+		if (status !== lastTpsDisplay && ctx.hasUI) {
+			lastTpsDisplay = status;
+			ctx.ui.setStatus("omlx-tps", status);
+			log("turn_end status:", status);
 		}
 	});
 
 	pi.on("turn_start", (event, ctx) => {
 		lastChunk = null;
 		lastTpsDisplay = null;
+		pollTick = 0;
+		turnCtx = ctx;
+		log("turn_start: stored ctx, hasUI:", ctx.hasUI);
 	});
 
 	pi.on("session_shutdown", () => {
 		lastChunk = null;
 		lastTpsDisplay = null;
+		turnCtx = null;
+		stopActivePollers();
 		globalThis.fetch = originalFetch;
 		delete globalState[EXTENSION_KEY];
 	});
