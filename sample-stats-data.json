@@ -1,0 +1,181 @@
+{
+	"total_tokens_served": 33338,
+	"total_cached_tokens": 18432,
+	"cache_efficiency": 55.7,
+	"total_prompt_tokens": 33114,
+	"total_completion_tokens": 224,
+	"total_requests": 4,
+	"avg_prefill_tps": 283.0,
+	"avg_generation_tps": 17.9,
+	"uptime_seconds": 308.7,
+	"host": "127.0.0.1",
+	"port": 8000,
+	"api_key": "ollama",
+	"cli_prefix": "omlx",
+	"claude_code_context_scaling_enabled": false,
+	"claude_code_target_context_size": 200000,
+	"engines": {
+		"mlx-lm": {
+			"name": "mlx-lm",
+			"version": "0.31.3",
+			"commit": null,
+			"url": null
+		},
+		"mlx-vlm": {
+			"name": "mlx-vlm",
+			"version": "0.6.2",
+			"commit": null,
+			"url": null
+		},
+		"mlx-embeddings": {
+			"name": "mlx-embeddings",
+			"version": "0.1.0",
+			"commit": null,
+			"url": null
+		},
+		"mlx-audio": {
+			"name": "mlx-audio",
+			"version": "0.4.3",
+			"commit": null,
+			"url": null
+		}
+	},
+	"active_models": {
+		"models": [
+			{
+				"id": "Qwen3.6-35B-A3B-MLX-oQ4-FP16",
+				"estimated_size": 21393481580,
+				"estimated_size_formatted": "19.92GB",
+				"actual_size": 20614144384,
+				"actual_size_formatted": "19.20GB",
+				"pinned": false,
+				"is_loading": false,
+				"loading_elapsed_seconds": null,
+				"loading_estimated_seconds": null,
+				"loading_remaining_seconds_estimate": null,
+				"active_requests": 1,
+				"waiting_requests": 1,
+				"waiting": [
+					{
+						"request_id": "41744be9-1c8f-4fac-91b3-bd54e9ac4820",
+						"queue_position": 1,
+						"elapsed_seconds": 27.042332250000015,
+						"prompt_tokens": 11580
+					}
+				],
+				"activities": [],
+				"prefilling": [
+					{
+						"request_id": "41744be9-1c8f-4fac-91b3-bd54e9ac4820",
+						"processed": 8192,
+						"total": 11580,
+						"speed": 375.1,
+						"eta": 9.0,
+						"elapsed": 19.9,
+						"phase": "prefill",
+						"detail": null
+					}
+				],
+				"generating": [],
+				"idle_seconds": 27.08878993988037,
+				"ttl_remaining_seconds": 3572.9112100601196
+			}
+		],
+		"model_memory_used": 23090263360,
+		"model_memory_max": 27753772352,
+		"memory_pressure": {
+			"enabled": true,
+			"current_bytes": 23090263360,
+			"soft_bytes": 23590706499,
+			"hard_bytes": 26366083734,
+			"current_formatted": "21.5GB",
+			"soft_formatted": "22.0GB",
+			"hard_formatted": "24.6GB",
+			"pressure_level": "ok"
+		},
+		"total_active_requests": 1,
+		"total_waiting_requests": 1
+	},
+	"runtime_cache": {
+		"base_path": "/Users/nathandaven/.omlx",
+		"ssd_cache_dir": "/Volumes/Nathan X-9 SSD/Models/.omlx/cache",
+		"response_state_dir": "/Volumes/Nathan X-9 SSD/Models/.omlx/cache/response-state",
+		"models": [
+			{
+				"id": "Qwen3.6-35B-A3B-MLX-oQ4-FP16",
+				"block_size": 2048,
+				"indexed_blocks": 14,
+				"indexed_blocks_display": "14",
+				"has_sub_block_cache": false,
+				"partial_block_skips": 2,
+				"partial_tokens_skipped": 890,
+				"last_partial_tokens_skipped": 0,
+				"last_tokens_to_next_block": 0,
+				"num_files": 66,
+				"total_size_bytes": 6949249624,
+				"max_size_bytes": 199715979264,
+				"hot_cache_max_bytes": 0,
+				"hot_cache_size_bytes": 0,
+				"hot_cache_entries": 0,
+				"cache_rates": {
+					"windows": {
+						"1m": {
+							"prefix_hit_rate": 1.0,
+							"prefix_hits": 2,
+							"prefix_misses": 0,
+							"prefix_match_efficiency": 0.8849,
+							"evictions": 0,
+							"eviction_rate_per_min": 0.0,
+							"ssd_hot_hits": 0,
+							"ssd_disk_loads": 10,
+							"ssd_hot_rate": 0.0
+						},
+						"5m": {
+							"prefix_hit_rate": 1.0,
+							"prefix_hits": 7,
+							"prefix_misses": 0,
+							"prefix_match_efficiency": 0.846,
+							"evictions": 0,
+							"eviction_rate_per_min": 0.0,
+							"ssd_hot_hits": 0,
+							"ssd_disk_loads": 26,
+							"ssd_hot_rate": 0.0
+						},
+						"15m": {
+							"prefix_hit_rate": 1.0,
+							"prefix_hits": 7,
+							"prefix_misses": 0,
+							"prefix_match_efficiency": 0.846,
+							"evictions": 0,
+							"eviction_rate_per_min": 0.0,
+							"ssd_hot_hits": 0,
+							"ssd_disk_loads": 26,
+							"ssd_hot_rate": 0.0
+						}
+					},
+					"cumulative": {
+						"prefix_hits": 8,
+						"prefix_misses": 0,
+						"prefix_hit_rate": 1.0,
+						"prefix_tokens_saved": 59392,
+						"prefix_match_efficiency": 0.8544,
+						"evictions": 0,
+						"ssd_hot_hits": 0,
+						"ssd_disk_loads": 29,
+						"ssd_saves": 2,
+						"hot_cache_evictions": 0,
+						"hot_cache_promotions": 0,
+						"ssd_hot_rate": 0.0
+					}
+				}
+			}
+		],
+		"total_num_files": 66,
+		"total_size_bytes": 6949249624,
+		"effective_block_sizes": [2048],
+		"disk_max_bytes": 199715979264,
+		"hot_cache_max_bytes": 0,
+		"hot_cache_size_bytes": 0,
+		"hot_cache_entries": 0
+	}
+}
