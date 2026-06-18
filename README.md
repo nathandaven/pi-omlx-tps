@@ -6,7 +6,7 @@ This extension is basic and adds [omlx](https://github.com/jundot/omlx) stat rep
 
 ```sh
  ⠴ Loading model... (17.0% complete, 31.2s remaining, 3.4gb/25.4gb used)
- ⠏ Preparing... (21.2gb/25.7gb used)
+ ⠼ Preparing... (91% cached, 6.4s queued, 30.1gb/35.6gb used)
  ⠼ Prefilling... (83.7% complete, 31.6s remaining, 22.7gb/25.1gb used)
  ⠸ Generating... (20.0 tok/s, 2.1s elapsed, 20.1gb/25.3gb used)
 ```

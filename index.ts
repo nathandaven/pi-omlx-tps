@@ -314,7 +314,8 @@ async function pollStats(): Promise<void> {
                 const total = p.total;
                 const processed = p.processed;
                 const pct = total > 0 ? Math.round((processed / total) * 1000) / 10 : 0;
-                const eta = p.eta ?? 0;
+                // eta can be null early in prefill; calc from elapsed progress
+                const eta = p.eta ?? (p.elapsed > 0 ? Math.round((p.elapsed / Math.max(processed, 1)) * (total - processed)) : 0);
                 updateWorking(`Prefilling... (${pct.toFixed(1)}% complete, ${eta.toFixed(1)}s remaining, ${memTag})`, "prefill");
                 if (lastChunk?.usage) updateStatus(lastChunk.usage);
                 break;
@@ -323,16 +324,25 @@ async function pollStats(): Promise<void> {
             // active generation
             case model.generating.length > 0: {
                 const g = model.generating[0];
-                const speed = Math.round(g.tokens_per_second);
-                const elapsed = Math.round(g.elapsed_seconds);
-                updateWorking(`Generating... (${speed.toFixed(1)} tok/s, ${elapsed.toFixed(1)}s elapsed, ${memTag})`, "gen");
+                const speed = g.tokens_per_second;
+                const elapsed = g.elapsed_seconds;
+                const genPct = g.max_tokens > 0 ? Math.round((g.generated_tokens / g.max_tokens) * 1000) / 10 : 0;
+                updateWorking(`Generating... (${genPct.toFixed(1)}% tok budget, ${speed.toFixed(1)} tok/s, ${elapsed.toFixed(1)}s elapsed, ${memTag})`, "gen");
                 if (lastChunk?.usage) updateStatus(lastChunk.usage);
                 break;
             }
 
-            // idle / preparing
+            // idle / preparing — show cache warmup progress if available
             default: {
-                updateWorking(`Preparing... (${memTag})`, "prepare");
+                const waiting = model.waiting[0];
+                const cacheModel = stats.runtime_cache?.models.find(c => c.id === model.id);
+                const oneMin = cacheModel?.cache_rates?.windows as { '1m'?: { prefix_match_efficiency: number } } & Record<string, any>;
+                const cachedPct = Math.round((oneMin?.['1m']?.prefix_match_efficiency ?? 0) * 100);
+                const queueInfo = waiting && waiting.elapsed_seconds > 0
+                    ? `${waiting.elapsed_seconds.toFixed(1)}s queued, `
+                    : '';
+                const cacheInfo = cachedPct > 0 ? `${cachedPct}% cached, ` : '';
+                updateWorking(`Preparing... (${cacheInfo}${queueInfo}${memTag})`, "prepare");
                 if (lastChunk?.usage) updateStatus(lastChunk.usage);
                 break;
             }
