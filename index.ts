@@ -3,8 +3,8 @@ import { AuthStorage } from "@earendil-works/pi-coding-agent";
 
 const DEFAULT_OMLX_BASE_URL = "http://127.0.0.1:8000/v1";
 const ADMIN_URL = "http://127.0.0.1:8000/admin/api/stats";
-const LOG_FILE = "/tmp/omlx-cpp-tps.log";
-const DEBUG = process.env.OMLX_CPP_EXTENSION_DEBUG === "1";
+const LOG_FILE = "/tmp/omlx-tps.log";
+const DEBUG = process.env.OMLX_TPS_EXTENSION_DEBUG === "1";
 const EXTENSION_KEY = Symbol.for("pi-omlx-tps/loaded");
 
 function log(...args: any[]) {
