@@ -1,8 +1,6 @@
 # pi-omlx-tps
 
-This extension is basic and adds [omlx](https://github.com/jundot/omlx) stat reporting using the built in omlx stats endpoint. The goal was to bring the stats given by the webui to the processing prompt.
-
-![](./screenshots/demo.gif)
+This extension is basic and adds [omlx](https://github.com/jundot/omlx) stat reporting using the built in omlx stats endpoint. The goal was to bring the stats given by the webui to the processing prompt. It also adds data each turn to the bottom status bar on tokens in/out and time elapsed.
 
 **Example**:
 
@@ -13,9 +11,11 @@ This extension is basic and adds [omlx](https://github.com/jundot/omlx) stat rep
  ⠸ Generating... (20.0 tok/s, 2.1s elapsed, 20.1gb/25.3gb used)
 ```
 
-It is reccomended to use [pi-omlx-picker](https://pi.dev/packages/pi-omlx-picker?name=omlx) for omlx model configuration and API key configuration.
+![](./screenshots/demo.gif)
 
 The maxmium ram defaults to the hard limit value, not soft. This is not configurable at the moment.
+
+If you have a api key configured in the web ui, the extension will use the api key stored in the pi auth storage as a first try. This lets it work with [pi-omlx-picker](https://pi.dev/packages/pi-omlx-picker?name=omlx). It is reccomended to just use this for omlx model configuration and API key confgiuration. As a fall back, it will use the `OMLX_API_KEY` env variable.
 
 ## Install
 
