@@ -239,6 +239,7 @@ let lastChunk: { model: string; usage: OmlxStreamUsage } | null = null;
 let lastTpsDisplay: string | null = null;
 let turnCtx: { ui: { setStatus(key: string, text: string | undefined): void; setWorkingMessage(msg: string): void }; hasUI: boolean } | null = null;
 let activePollers: ReturnType<typeof setInterval>[] = [];
+let lastCachedTokens = 0; // baseline partial_tokens_skipped when preparing starts
 
 // ui helpers
 
@@ -332,17 +333,27 @@ async function pollStats(): Promise<void> {
                 break;
             }
 
-            // idle / preparing — show cache warmup progress if available
+            // idle / preparing — track cache warmup progress
             default: {
                 const waiting = model.waiting[0];
                 const cacheModel = stats.runtime_cache?.models.find(c => c.id === model.id);
-                const oneMin = cacheModel?.cache_rates?.windows as { '1m'?: { prefix_match_efficiency: number } } & Record<string, any>;
-                const cachedPct = Math.round((oneMin?.['1m']?.prefix_match_efficiency ?? 0) * 100);
-                const queueInfo = waiting && waiting.elapsed_seconds > 0
-                    ? `${waiting.elapsed_seconds.toFixed(1)}s queued, `
-                    : '';
-                const cacheInfo = cachedPct > 0 ? `${cachedPct}% cached, ` : '';
-                updateWorking(`Preparing... (${cacheInfo}${queueInfo}${memTag})`, "prepare");
+                const cachedTokens = cacheModel?.partial_tokens_skipped ?? 0;
+
+                // reset baseline only when model is truly idle with no pending request
+                if (!waiting) {
+                    lastCachedTokens = cachedTokens;
+                }
+                const cachedDelta = waiting ? cachedTokens - lastCachedTokens : 0;
+
+                const promptTokens = waiting?.prompt_tokens ?? 0;
+                const cachedPct = promptTokens > 0 ? Math.min(100, Math.round((cachedDelta / promptTokens) * 100)) : 0;
+                const queueTime = waiting?.elapsed_seconds ?? 0;
+
+                let parts = [];
+                if (cachedPct > 0) parts.push(`${cachedPct}% cached`);
+                if (queueTime > 0) parts.push(`${queueTime.toFixed(1)}s queued`);
+                parts.push(memTag);
+                updateWorking(`Preparing... (${parts.join(', ')})`, "prepare");
                 if (lastChunk?.usage) updateStatus(lastChunk.usage);
                 break;
             }
@@ -421,6 +432,7 @@ function resetState() {
     lastChunk = null;
     lastTpsDisplay = null;
     activeModelId = null;
+    lastCachedTokens = 0;
 }
 
 // extension entry
